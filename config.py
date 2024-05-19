@@ -1,2 +1,3 @@
 TOKEN = ""
 PAYMENTS_TOKEN = ""
+GPT_TOKEN = ""
