@@ -1,4 +1,7 @@
 TOKEN = ""
 PAYMENTS_TOKEN = ""
 GPT_TOKEN = ""
-IS_DEV = False
+IS_DEV = True
+ANALYTICS_URL = ""
+PROXY_URL = ""
+ADMIN_TOKEN = ""
