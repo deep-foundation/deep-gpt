@@ -406,7 +406,7 @@ async def handle_balance(message: Message):
         if gpt_tokens.get("tokens") >= 30000:
             return "🕒 Автопополнение доступно, если меньше *30000*⚡️"
 
-        return f"🕒 Следующее аптопополнение будет: *{get_date()}*   "
+        return f"🕒 Следующее автопополнение будет: *{get_date()}*   "
 
     def accept_account():
         if referral['isActivated']:
@@ -418,9 +418,12 @@ async def handle_balance(message: Message):
 👩🏻‍💻 Количество рефералов: *{len(referral['children'])}*
 🤑 Ежедневное автопополнение: *{referral['award']}*⚡️
 {accept_account()}
-    
+🕒 Автопополнение доступно, если баланс меньше *30000*⚡️
+
+
 💵 Текущий баланс: *{gpt_tokens.get("tokens")}*⚡️ 
 """)
+
 
 
 @gptRouter.message(TextCommand([clear_command(), clear_text()]))
