@@ -13,10 +13,11 @@ from aiogram import Router
 from aiogram import types
 from aiogram.types import BufferedInputFile, FSInputFile, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.types import Message, CallbackQuery
-# from aiogram.filters import Document, MediaGroup
+from openai import OpenAI
 
 from bot.agreement import agreement_handler
-from bot.filters import TextCommand, Document, MediaGroup, Photo, TextCommandQuery, Voice, StateCommand, StartWithQuery, Video
+from bot.filters import TextCommand, Document, Photo, TextCommandQuery, Voice, StateCommand, StartWithQuery, \
+    Video
 from bot.gpt import change_model_command
 from bot.gpt.command_types import change_system_message_command, change_system_message_text, change_model_text, \
     balance_text, balance_command, clear_command, clear_text, get_history_command, get_history_text
@@ -24,10 +25,9 @@ from bot.gpt.system_messages import get_system_message, system_messages_list, \
     create_system_message_keyboard
 from bot.gpt.utils import is_chat_member, send_message, get_tokens_message, \
     create_change_model_keyboard, checked_text
-from bot.middlewares.MiddlewareAward import MiddlewareAward
 from bot.utils import include
 from bot.utils import send_photo_as_file
-from config import TOKEN, GO_API_KEY
+from config import TOKEN, GO_API_KEY, PROXY_URL
 from services import gptService, GPTModels, completionsService, tokenizeService, referralsService, stateService, \
     StateTypes, systemMessage
 from services.gpt_service import SystemMessages
@@ -37,8 +37,6 @@ from services.utils import async_post, async_get
 gptRouter = Router()
 
 questionAnswer = False
-
-gptRouter.message.middleware(MiddlewareAward())
 
 
 async def answer_markdown_file(message: Message, md_content: str):
@@ -146,7 +144,7 @@ async def handle_gpt_request(message: Message, text: str):
         await message_loading.delete()
         await message.answer(get_tokens_message(gpt_tokens_before.get("tokens", 0) - gpt_tokens_after.get("tokens", 0)))
     except Exception as e:
-        logging.log(logging.INFO, e)
+        print(e)
 
 
 async def get_photos_links(message, photos):
@@ -197,48 +195,38 @@ async def handle_image(message: Message, album):
 
     content.append({"type": "text", "text": text})
 
-    bot_model = gptService.get_current_model(message.from_user.id)
-
-    if bot_model.value != GPTModels.GPT_4o_mini.value:
-        gptService.set_current_model(message.from_user.id, GPTModels.GPT_4o_mini)
-        await message.answer("""
-Для взаимодействия с картинками модель автоматически была сменена на `GPT-4o-mini`.        
-
-Сменить модель - /models
-        """)
-
     await handle_gpt_request(message, content)
 
 
-async def transcribe_voice_sync(voice_file_url: str):
-    headers = {
-        "Authorization": f"Bearer {GO_API_KEY}",
-    }
+async def transcribe_voice_sync(user_id: str, voice_file_url: str):
+    token = await tokenizeService.get_token(user_id)
 
     voice_response = await async_get(voice_file_url)
     if voice_response.status_code == 200:
         voice_data = voice_response.content
 
-        files = {
-            'file': ('audio.ogg', voice_data, 'audio/ogg'),
-            'model': (None, 'whisper-1')
-        }
+        client = OpenAI(
+            api_key=token["id"],
+            base_url=f"{PROXY_URL}/v1/"
+        )
 
-        post_response = await async_post("https://api.goapi.ai/v1/audio/transcriptions", headers=headers, files=files)
-        if post_response.status_code == 200:
-            return {"success": True, "text": post_response.json()["text"]}
-        else:
-            return {"success": False, "text": f"Error: {post_response.status_code}"}
+        transcription = client.audio.transcriptions.create(file=('audio.ogg', voice_data, 'audio/ogg'),
+                                                           model="whisper-1", language="RU")
+
+        print(transcription)
+        print(transcription.duration)
+        print( transcription.text)
+        return {"success": True, "text": transcription.text, 'energy': int(transcription.duration)}
     else:
-        return {"success": False, "text": f"Error: {voice_response.status_code}"}
+        return {"success": False, "text": f"Error: Голосовое сообщение не распознанок"}
 
 
 executor = ThreadPoolExecutor()
 
 
-async def transcribe_voice(voice_file_url: str):
+async def transcribe_voice(user_id: int, voice_file_url: str):
     loop = asyncio.get_event_loop()
-    response = await loop.run_in_executor(executor, transcribe_voice_sync, voice_file_url)
+    response = await loop.run_in_executor(executor, transcribe_voice_sync, user_id, voice_file_url)
     return await response
 
 
@@ -272,16 +260,14 @@ async def handle_voice(message: Message):
     file = await message.bot.get_file(voice_file_id)
     file_url = f"https://api.telegram.org/file/bot{TOKEN}/{file.file_path}"
 
-    response_json = await transcribe_voice(file_url)
+    response_json = await transcribe_voice(message.from_user.id, file_url)
 
-    tokens = duration * 30
     if response_json.get("success"):
         await message.answer(f"""
-🎤 Обработка аудио затратила `{tokens}`⚡️ 
+🎤 Обработка аудио затратила `{response_json.get("energy")}`⚡️ 
 
 ❔ /help - Информация по ⚡️
 """)
-        await tokenizeService.update_user_token(message.from_user.id, tokens, 'subtract')
 
         await handle_gpt_request(message, response_json.get('text'))
         return
@@ -317,6 +303,7 @@ async def handle_document(message: Message):
     except Exception as e:
         logging.log(logging.INFO, e)
 
+
 async def process_document(document, bot):
     try:
         with NamedTemporaryFile(delete=False) as temp_file:
@@ -329,6 +316,7 @@ async def process_document(document, bot):
     except Exception as e:
         raise Exception(f"Ошибка: не удалось обработать файл '{document.file_name}' - {str(e)}")
 
+
 def is_valid_group_message(message: Message):
     if message.chat.type in ['group', 'supergroup']:
         if message.caption_entities is None:
@@ -337,7 +325,7 @@ def is_valid_group_message(message: Message):
         return any(mention.offset <= 0 < mention.offset + mention.length for mention in mentions)
     return True
 
-x
+
 async def handle_documents(message: Message, documents):
     bot = message.bot
     combined_text = ""
@@ -362,6 +350,7 @@ async def handle_documents(message: Message, documents):
 
     await handle_gpt_request(message, result_text)
 
+
 # Handler for single document
 @gptRouter.message(Document())
 async def handle_document(message: Message):
@@ -374,17 +363,8 @@ async def handle_document(message: Message):
     if user_document:
         await handle_documents(message, [user_document])
 
-# Handler for media group (multiple documents)
-@gptRouter.message(MediaGroup())
-async def handle_media_group(message: Message):
-    # Check message validity in group/supergroup
-    if not is_valid_group_message(message):
-        return
 
-    # Process all documents in the media group
-    user_documents = message.media_group if message.media_group else None
-    if user_documents:
-        await handle_documents(message, user_documents)
+# Handler for media group (multiple documents)
 
 
 @gptRouter.message(TextCommand([balance_text(), balance_command()]))
@@ -406,7 +386,7 @@ async def handle_balance(message: Message):
         if gpt_tokens.get("tokens") >= 30000:
             return "🕒 Автопополнение доступно, если меньше *30000*⚡️"
 
-        return f"🕒 Следующее автопополнение будет: *{get_date()}*   "
+        return f"🕒 Следующее аптопополнение будет: *{get_date()}*   "
 
     def accept_account():
         if referral['isActivated']:
@@ -418,25 +398,22 @@ async def handle_balance(message: Message):
 👩🏻‍💻 Количество рефералов: *{len(referral['children'])}*
 🤑 Ежедневное автопополнение: *{referral['award']}*⚡️
 {accept_account()}
-🕒 Автопополнение доступно, если баланс меньше *30000*⚡️
-
-
+    
 💵 Текущий баланс: *{gpt_tokens.get("tokens")}*⚡️ 
 """)
-
 
 
 @gptRouter.message(TextCommand([clear_command(), clear_text()]))
 async def handle_clear_context(message: Message):
     user_id = message.from_user.id
 
-    hello = await tokenizeService.clear_dialog(user_id)
+    response = await tokenizeService.clear_dialog(user_id)
 
-    if hello.get("status") == 404:
+    if not response.get("status"):
         await message.answer("Диалог уже пуст!")
         return
 
-    if hello is None:
+    if response is None:
         await message.answer("Ошибка 😔: Не удалось очистить контекст!")
         return
 
@@ -493,9 +470,11 @@ async def handle_change_model(message: Message):
 
 1000 *claude-3-opus* токенов = 6000 ⚡️
 1000 *o1-preview* токенов = 5000 ⚡️
+1000 *GPT-4o-unofficial* токенов = 1100 ⚡️
 1000 *GPT-4o* токенов = 1000 ⚡️
 1000 *claude-3.5-sonnet* токенов = 1000 ⚡️
 1000 *o1-mini* токенов = 800 ⚡️
+1000 *GPT-Auto* токенов = 150 ⚡️
 1000 *claude-3-haiku* токенов = 100 ⚡️
 1000 *GPT-4o-mini* токенов = 70 ⚡️
 1000 *GPT-3.5-turbo* токенов = 50 ⚡️
@@ -674,3 +653,4 @@ async def handle_completion(message: Message, batch_messages):
     text = f" {text}\n\n {message.reply_to_message.text}" if message.reply_to_message else text
 
     await handle_gpt_request(message, text)
+
